@@ -30,8 +30,11 @@ def test_swipe_detected_on_fast_motion():
     f1[90:130, 90:130] = 200
     f2 = bgr_frame()
     f2[200:240, 300:340] = 200
+    f3 = bgr_frame()
+    f3[310:350, 450:490] = 200
     det.process_frame(f1)
-    result = det.process_frame(f2)
+    det.process_frame(f2)
+    result = det.process_frame(f3)
     assert result is not None
     assert result['type'] == 'swipe'
 
@@ -43,8 +46,11 @@ def test_swipe_coords_normalized():
     f1[90:130, 90:130] = 200
     f2 = bgr_frame()
     f2[200:240, 300:340] = 200
+    f3 = bgr_frame()
+    f3[310:350, 450:490] = 200
     det.process_frame(f1)
-    result = det.process_frame(f2)
+    det.process_frame(f2)
+    result = det.process_frame(f3)
     assert result is not None
     for key in ('x1', 'y1', 'x2', 'y2'):
         assert 0.0 <= result[key] <= 1.0, f"{key}={result[key]} out of [0,1]"
