@@ -62,6 +62,9 @@ def test_slow_motion_not_detected():
     f1 = bgr_frame()
     f1[90:130, 90:130] = 200
     f2 = bgr_frame()
-    f2[92:132, 92:132] = 200  # tiny shift, well below threshold
+    f2[92:132, 92:132] = 200  # tiny shift
+    f3 = bgr_frame()
+    f3[94:134, 94:134] = 200  # another tiny shift, still well below threshold=100
     det.process_frame(f1)
-    assert det.process_frame(f2) is None
+    det.process_frame(f2)
+    assert det.process_frame(f3) is None
