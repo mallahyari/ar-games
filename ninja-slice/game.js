@@ -17,7 +17,8 @@ function initState() {
         objects: [], score: 0, lives: 3,
         maxObjects: 3, speed: 3, spawnInterval: 2000,
         lastSpawnTime: 0, difficultyTimer: 0,
-        gameOver: false, running: false,
+        gameOver: false,
+        animFrameId: null,
         ws: null, wsConnected: false,
         trails: [],
         devMode: new URLSearchParams(window.location.search).has('dev'),
@@ -208,23 +209,22 @@ function gameLoop(timestamp) {
     update(timestamp - state.lastTime);
     state.lastTime = timestamp;
     render();
-    requestAnimationFrame(gameLoop);
+    state.animFrameId = requestAnimationFrame(gameLoop);
 }
 
 function triggerGameOver() {
     state.gameOver = true;
-    state.running  = false;
 }
 
 function startGame() {
     initState();
-    state.running = true;
+    if (state.devMode) state.wsConnected = true;
     connectWebSocket();
-    if (state.devMode) setupDevMode();
-    requestAnimationFrame(gameLoop);
+    state.animFrameId = requestAnimationFrame(gameLoop);
 }
 
 function restartGame() {
+    if (state.animFrameId) cancelAnimationFrame(state.animFrameId);
     if (state.ws) { state.ws.onclose = null; state.ws.close(); }
     startGame();
 }
@@ -245,7 +245,6 @@ function connectWebSocket() {
 }
 
 function setupDevMode() {
-    state.wsConnected = true;
     canvas.addEventListener('mousedown', (e) => {
         const r = canvas.getBoundingClientRect();
         state.mouseStart = {
@@ -275,4 +274,5 @@ window.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('resize', resize);
     canvas.addEventListener('click', () => { if (state.gameOver) restartGame(); });
     startGame();
+    if (new URLSearchParams(window.location.search).has('dev')) setupDevMode();
 });
