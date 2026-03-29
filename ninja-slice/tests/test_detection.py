@@ -11,15 +11,14 @@ def make_frame(h=480, w=640):
 
 
 def hand_result(x, y):
-    """Mock HandLandmarker result with wrist at normalized (x, y)."""
     wrist = MagicMock()
     wrist.x, wrist.y = x, y
     result = MagicMock()
-    result.hand_landmarks = [[wrist]]  # [hand_index][landmark_index]
+    result.hand_landmarks = [[wrist]]
     return result
 
 
-def no_hand_result():
+def no_hand():
     result = MagicMock()
     result.hand_landmarks = []
     return result
@@ -27,65 +26,101 @@ def no_hand_result():
 
 @pytest.fixture
 def det():
-    """SwipeDetector with HandLandmarker mocked out (no model file needed)."""
     with patch.object(vision.HandLandmarker, 'create_from_options') as mock_create:
         mock_landmarker = MagicMock()
         mock_create.return_value = mock_landmarker
         from detection import SwipeDetector
-        d = SwipeDetector()
+        d = SwipeDetector(velocity_threshold=0.05, quiet_frames=2)
         d.hands = mock_landmarker
         yield d
 
 
-def test_no_swipe_when_no_hand_detected(det):
-    det.hands.detect = MagicMock(return_value=no_hand_result())
-    assert det.process_frame(make_frame()) is None
+def feed(det, results):
+    """Feed a list of mock results into det, return list of non-None outputs."""
+    outputs = []
+    for r in results:
+        det.hands.detect = MagicMock(return_value=r)
+        out = det.process_frame(make_frame())
+        if out is not None:
+            outputs.append(out)
+    return outputs
+
+
+def test_no_swipe_when_no_hand(det):
+    swipes = feed(det, [no_hand(), no_hand()])
+    assert swipes == []
 
 
 def test_no_swipe_on_first_hand_frame(det):
-    det.hands.detect = MagicMock(return_value=hand_result(0.5, 0.5))
-    assert det.process_frame(make_frame()) is None
+    swipes = feed(det, [hand_result(0.5, 0.5)])
+    assert swipes == []
 
 
-def test_swipe_detected_on_fast_wrist_movement(det):
-    det.hands.detect = MagicMock(side_effect=[
-        hand_result(0.2, 0.5),
-        hand_result(0.8, 0.5),  # dx=0.6, well above default threshold
+def test_swipe_emitted_after_gesture_completes(det):
+    # fast move then 2 quiet frames → swipe emitted
+    swipes = feed(det, [
+        hand_result(0.2, 0.5),   # prev set
+        hand_result(0.7, 0.5),   # fast: gesture starts
+        hand_result(0.71, 0.5),  # slow: quiet 1
+        hand_result(0.72, 0.5),  # slow: quiet 2 → emit
     ])
-    det.process_frame(make_frame())
-    result = det.process_frame(make_frame())
-    assert result is not None
-    assert result['type'] == 'swipe'
+    assert len(swipes) == 1
+    assert swipes[0]['type'] == 'swipe'
 
 
-def test_swipe_coords_normalized(det):
-    det.hands.detect = MagicMock(side_effect=[
-        hand_result(0.2, 0.5),
-        hand_result(0.8, 0.5),
+def test_swipe_covers_full_arc(det):
+    # x1 should be gesture start, x2 should be near gesture end
+    swipes = feed(det, [
+        hand_result(0.1, 0.5),   # prev
+        hand_result(0.6, 0.5),   # fast: start at x≈0.1
+        hand_result(0.9, 0.5),   # still fast
+        hand_result(0.91, 0.5),  # quiet 1
+        hand_result(0.92, 0.5),  # quiet 2 → emit
     ])
-    det.process_frame(make_frame())
-    result = det.process_frame(make_frame())
-    assert result is not None
+    assert len(swipes) == 1
+    s = swipes[0]
+    assert s['x1'] < 0.3, f"start should be near left, got {s['x1']}"
+    assert s['x2'] > 0.8, f"end should be near right, got {s['x2']}"
+
+
+def test_swipe_coords_in_range(det):
+    swipes = feed(det, [
+        hand_result(0.2, 0.3),
+        hand_result(0.8, 0.7),
+        hand_result(0.81, 0.71),
+        hand_result(0.82, 0.72),
+    ])
+    assert len(swipes) == 1
     for key in ('x1', 'y1', 'x2', 'y2'):
-        assert 0.0 <= result[key] <= 1.0, f"{key}={result[key]} out of [0,1]"
+        assert 0.0 <= swipes[0][key] <= 1.0
 
 
-def test_slow_wrist_movement_not_detected(det):
-    det.velocity_threshold = 0.1
-    det.hands.detect = MagicMock(side_effect=[
+def test_slow_movement_not_detected(det):
+    swipes = feed(det, [
         hand_result(0.5, 0.5),
-        hand_result(0.51, 0.5),  # dx=0.01, below threshold=0.1
+        hand_result(0.51, 0.5),  # dx=0.01, below threshold
+        hand_result(0.52, 0.5),
+        hand_result(0.53, 0.5),
     ])
-    det.process_frame(make_frame())
-    assert det.process_frame(make_frame()) is None
+    assert swipes == []
 
 
-def test_tracking_resets_when_hand_lost(det):
-    det.hands.detect = MagicMock(side_effect=[
-        hand_result(0.2, 0.5),  # frame 1: hand seen, prev_wrist set
-        no_hand_result(),         # frame 2: hand lost, prev_wrist cleared
-        hand_result(0.8, 0.5),  # frame 3: hand back, no prev → no swipe
+def test_hand_loss_mid_swipe_emits(det):
+    # If hand disappears during a swipe, emit what we have
+    swipes = feed(det, [
+        hand_result(0.2, 0.5),
+        hand_result(0.7, 0.5),  # fast: gesture starts
+        no_hand(),               # lost → emit immediately
     ])
-    det.process_frame(make_frame())
-    det.process_frame(make_frame())
-    assert det.process_frame(make_frame()) is None
+    assert len(swipes) == 1
+
+
+def test_tracking_resets_after_hand_loss(det):
+    # After hand loss, first reappearance does not immediately swipe
+    swipes = feed(det, [
+        hand_result(0.2, 0.5),
+        hand_result(0.7, 0.5),  # fast
+        no_hand(),               # lost → emits swipe #1
+        hand_result(0.1, 0.5),  # reappears — prev_wrist reset, no swipe yet
+    ])
+    assert len(swipes) == 1   # only the one from before the loss
