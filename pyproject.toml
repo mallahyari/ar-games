@@ -7,6 +7,10 @@ requires-python = ">=3.13"
 dependencies = [
     "numpy>=2.4.4",
     "opencv-python>=4.13.0.92",
-    "pytest>=9.0.2",
     "websockets>=16.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
 ]
