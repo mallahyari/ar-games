@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Gesture PDF — AR View</title>
+  <link rel="stylesheet" href="ar.css">
+</head>
+<body>
+  <canvas id="ar-canvas"></canvas>
+
+  <div id="hud">
+    <label id="file-label" for="file-input">Open PDF</label>
+    <input type="file" id="file-input" accept=".pdf">
+    <span id="page-info">—</span>
+    <span id="zoom-info">100%</span>
+    <span id="gesture-status" class="disconnected">● Connecting...</span>
+    <span id="hud-hint">H — toggle HUD</span>
+  </div>
+
+  <div id="gesture-flash"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  </script>
+  <script type="module" src="ar-viewer.js"></script>
+</body>
+</html>

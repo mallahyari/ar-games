@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>AR Flashcards</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; font-family: -apple-system, sans-serif; }
+    #ar-canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+    #status {
+      position: fixed; top: 16px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.6);
+      color: #fff; padding: 8px 18px;
+      border-radius: 20px; font-size: 15px;
+      z-index: 10; white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="ar-canvas"></canvas>
+  <div id="status">Starting camera...</div>
+
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script type="module">
+    const canvas = document.getElementById('ar-canvas');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+
+    // Load flashcard data
+    const cards = await (await fetch('cards.json')).json();
+
+    // Track per-card state
+    const cardState = {};
+    // Last detected QR result per id — kept for HOLDOFF_MS after last seen
+    const lastDetected = {};  // id → { qr, lastSeen, stablePos }
+    const HOLDOFF_MS = 1200;  // keep card visible this long after QR lost
+    const POS_SMOOTH = 0.15;  // how fast position updates (lower = smoother)
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Start rear camera
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.playsInline = true;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+      video.srcObject = stream;
+      await new Promise(r => video.onloadedmetadata = r);
+      video.play();
+      statusEl.textContent = 'Point camera at a QR card';
+    } catch(e) {
+      statusEl.textContent = 'Camera error: ' + e.message;
+    }
+
+    // Off-screen canvas for QR scanning
+    const scanCanvas = document.createElement('canvas');
+    const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
+
+    // ── Drawing helpers ───────────────────────────────
+    function roundRect(ctx, x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y);
+      ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+      ctx.lineTo(x+w,y+h-r);
+      ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+      ctx.lineTo(x+r,y+h);
+      ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+      ctx.lineTo(x,y+r);
+      ctx.quadraticCurveTo(x,y,x+r,y);
+      ctx.closePath();
+    }
+
+    function wrapText(ctx, text, cx, y, maxW, lh) {
+      const words = text.split(' ');
+      let line = '', lines = [];
+      for (const w of words) {
+        const t = line + (line ? ' ' : '') + w;
+        if (ctx.measureText(t).width > maxW && line) { lines.push(line); line = w; }
+        else line = t;
+      }
+      if (line) lines.push(line);
+      const sy = y - ((lines.length-1)*lh)/2;
+      lines.forEach((l,i) => ctx.fillText(l, cx, sy + i*lh));
+    }
+
+    function drawFlashcard(stablePos, card, showAnswer) {
+      const cw = canvas.width, ch = canvas.height;
+
+      // Use stable smoothed position
+      const scaleX = cw / video.videoWidth;
+      const scaleY = ch / video.videoHeight;
+
+      const qrX = stablePos.x * scaleX;
+      const qrY = stablePos.y * scaleY;
+      const qrW = stablePos.w * scaleX;
+      const qrH = stablePos.h * scaleY;
+      const qrSize = Math.max(qrW, qrH);
+
+      // Card overlaid above the QR code — enforce minimum size so text is readable
+      const minCardW = canvas.width * 0.45;
+      const cardW = Math.max(qrSize * 2.2, minCardW);
+      const cardH = cardW * 0.65;
+      const cx = qrX + qrW / 2;
+      const cy = qrY - cardH * 0.6;
+      const x = cx - cardW / 2;
+      const y = cy - cardH / 2;
+
+      ctx.save();
+
+      // Shadow
+      ctx.shadowColor = 'rgba(0,0,0,0.5)';
+      ctx.shadowBlur = 20;
+
+      // Card background
+      ctx.globalAlpha = 0.93;
+      ctx.fillStyle = showAnswer ? card.color : '#1a1a2e';
+      roundRect(ctx, x, y, cardW, cardH, 16);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Border
+      ctx.strokeStyle = card.color;
+      ctx.lineWidth = 3;
+      roundRect(ctx, x, y, cardW, cardH, 16);
+      ctx.stroke();
+
+      ctx.globalAlpha = 1;
+
+      // Emoji
+      ctx.font = `${cardW * 0.14}px serif`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(card.emoji || '❓', cx, y + cardH * 0.3);
+
+      // Question / Answer text
+      ctx.font = `bold ${Math.max(12, cardW * 0.07)}px -apple-system, sans-serif`;
+      ctx.fillStyle = '#fff';
+      wrapText(ctx, showAnswer ? card.answer : card.question, cx, y + cardH * 0.6, cardW * 0.85, cardW * 0.09);
+
+      // Progress bar or answer label
+      if (!showAnswer) {
+        const state = cardState[card._id];
+        const progress = state ? Math.min((Date.now() - state.firstSeen) / 2000, 1) : 0;
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        roundRect(ctx, x+12, y+cardH-18, cardW-24, 8, 4);
+        ctx.fill();
+        ctx.fillStyle = card.color;
+        roundRect(ctx, x+12, y+cardH-18, (cardW-24)*progress, 8, 4);
+        ctx.fill();
+      } else {
+        ctx.font = `${Math.max(10, cardW * 0.055)}px -apple-system, sans-serif`;
+        ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        ctx.fillText('Answer ✓', cx, y + cardH - 6);
+      }
+
+
+      ctx.restore();
+    }
+
+    // ── Main loop ─────────────────────────────────────
+    let frameCount = 0;
+
+    function tick() {
+      if (video.readyState < 2) { requestAnimationFrame(tick); return; }
+
+      // Draw camera feed
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // Scan for QR every 3 frames for performance
+      frameCount++;
+      const detectedIds = new Set();
+
+      // Scan for QR every 3 frames
+      if (frameCount % 3 === 0) {
+        scanCanvas.width = video.videoWidth;
+        scanCanvas.height = video.videoHeight;
+        scanCtx.drawImage(video, 0, 0);
+        const imageData = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+        const qr = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: 'dontInvert',
+        });
+
+        if (qr && qr.data.startsWith('flashcard:')) {
+          const id = parseInt(qr.data.split(':')[1]);
+          const card = cards[String(id)];
+          if (card) {
+            const tl = qr.location.topLeftCorner;
+            const br = qr.location.bottomRightCorner;
+            const newPos = { x: tl.x, y: tl.y, w: br.x - tl.x, h: br.y - tl.y };
+            if (!lastDetected[id]) {
+              lastDetected[id] = { lastSeen: Date.now(), stablePos: newPos };
+            } else {
+              const s = lastDetected[id].stablePos;
+              s.x += (newPos.x - s.x) * POS_SMOOTH;
+              s.y += (newPos.y - s.y) * POS_SMOOTH;
+              s.w += (newPos.w - s.w) * POS_SMOOTH;
+              s.h += (newPos.h - s.h) * POS_SMOOTH;
+              lastDetected[id].lastSeen = Date.now();
+            }
+            if (!cardState[id]) cardState[id] = { firstSeen: Date.now() };
+          }
+        }
+
+        // Expire old detections
+        for (const idStr of Object.keys(lastDetected)) {
+          if (Date.now() - lastDetected[idStr].lastSeen > HOLDOFF_MS) {
+            delete lastDetected[idStr];
+            delete cardState[Number(idStr)];
+          }
+        }
+      }
+
+      // Draw cards every frame using last known stable positions
+      let anyVisible = false;
+      for (const [idStr, detected] of Object.entries(lastDetected)) {
+        const id = Number(idStr);
+        const card = cards[idStr];
+        if (!card) continue;
+        card._id = id;
+        const age = cardState[id] ? Date.now() - cardState[id].firstSeen : 0;
+        drawFlashcard(detected.stablePos, card, age > 2000);
+        statusEl.textContent = age > 2000 ? `Card #${id}: ${card.answer}` : `Card #${id}: ${card.question}`;
+        anyVisible = true;
+      }
+      if (!anyVisible) statusEl.textContent = 'Point camera at a QR card';
+
+      requestAnimationFrame(tick);
+    }
+
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Gesture PDF Viewer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="toolbar">
+    <label id="file-label" for="file-input">Open PDF</label>
+    <input type="file" id="file-input" accept=".pdf">
+    <span id="page-info">—</span>
+    <span id="zoom-info">100%</span>
+    <span id="gesture-status" class="disconnected">● Connecting...</span>
+  </div>
+
+  <div id="viewer-wrap">
+    <div id="drop-zone">
+      <div class="drop-hint">
+        <div class="drop-icon">📄</div>
+        <div>Drop a PDF here or click <strong>Open PDF</strong></div>
+        <div class="drop-sub">Then swipe up/down to scroll · Pinch to zoom</div>
+      </div>
+    </div>
+    <div id="pages-container"></div>
+  </div>
+
+  <div id="gesture-flash"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+    // Set worker path for pdf.js
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  </script>
+  <script src="viewer.js"></script>
+</body>
+</html>

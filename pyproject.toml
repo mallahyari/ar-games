@@ -8,6 +8,8 @@ dependencies = [
     "mediapipe>=0.10.33",
     "numpy>=2.4.4",
     "opencv-python>=4.13.0.92",
+    "pillow>=12.1.1",
+    "qrcode>=8.2",
     "websockets>=16.0",
 ]
 
