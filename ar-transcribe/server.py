@@ -20,6 +20,7 @@ import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from google import genai
 import uvicorn
 
 SAMPLE_RATE = 16000
@@ -38,8 +39,26 @@ DEEPGRAM_URL = (
     "&endpointing=300"
 )
 
+GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
+TARGET_LANG = "Persian (Farsi)"
+
 clients: set[WebSocket] = set()
 selected_device: int | None = None  # set at startup
+gemini_client: genai.Client | None = None
+
+
+async def translate(text: str) -> str:
+    """Translate text to Persian using Gemini Flash."""
+    try:
+        response = await asyncio.to_thread(
+            gemini_client.models.generate_content,
+            model=GEMINI_MODEL,
+            contents=f"Translate the following to {TARGET_LANG}. Return only the translation, no explanation:\n\n{text}",
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"[translate error] {e}", flush=True)
+        return text  # fall back to original if translation fails
 
 
 def pick_device() -> int | None:
@@ -108,12 +127,7 @@ async def run_transcription() -> None:
 
                 audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
-                frame_count = 0
                 def audio_callback(indata, frames, time_info, status):
-                    nonlocal frame_count
-                    frame_count += 1
-                    if frame_count % 20 == 0:
-                        print(f"[audio] frames={frame_count} rms={np.sqrt(np.mean(indata**2)):.4f}", flush=True)
                     pcm = (indata[:, 0] * 32767).astype(np.int16)
                     loop.call_soon_threadsafe(audio_queue.put_nowait, pcm.tobytes())
 
@@ -131,7 +145,9 @@ async def run_transcription() -> None:
                                 text = alts[0].get("transcript", "").strip()
                                 if text:
                                     print(f"[transcript] {text}", flush=True)
-                                    await broadcast(text)
+                                    translated = await translate(text)
+                                    print(f"[translated] {translated}", flush=True)
+                                    await broadcast(translated)
 
                 with sd.InputStream(
                     device=selected_device,
@@ -215,6 +231,12 @@ if __name__ == "__main__":
     if "DEEPGRAM_API_KEY" not in os.environ:
         print("ERROR: DEEPGRAM_API_KEY environment variable not set.")
         raise SystemExit(1)
+    if "GEMINI_API_KEY" not in os.environ:
+        print("ERROR: GEMINI_API_KEY environment variable not set.")
+        raise SystemExit(1)
+
+    gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    print(f"Translation: English → {TARGET_LANG} via Gemini Flash", flush=True)
 
     selected_device = pick_device()
 
