@@ -24,7 +24,7 @@ flowchart LR
     end
 
     C -->|transcript text| F
-    C -->|serves mobile.html| Phone Browser
+    C -->|serves mobile.html| F
 ```
 
 ## How It Works
