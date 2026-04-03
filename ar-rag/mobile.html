@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>AR RAG</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; font-family: -apple-system, sans-serif; }
+    #ar-canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+    #status {
+      position: fixed; top: 16px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.65);
+      color: #fff; padding: 8px 18px;
+      border-radius: 20px; font-size: 15px;
+      z-index: 10; white-space: nowrap;
+      max-width: 90vw; overflow: hidden; text-overflow: ellipsis;
+    }
+    #link-overlay {
+      position: fixed;
+      z-index: 20;
+      pointer-events: none;
+      display: none;
+    }
+    #link-overlay a {
+      display: inline-block;
+      pointer-events: all;
+      color: #4dc8ff;
+      font-size: 14px;
+      font-family: -apple-system, sans-serif;
+      background: rgba(0,0,0,0.6);
+      padding: 6px 14px;
+      border-radius: 20px;
+      border: 1px solid #4dc8ff55;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    #link-overlay a:active { opacity: 0.7; }
+  </style>
+</head>
+<body>
+  <canvas id="ar-canvas"></canvas>
+  <div id="status">Starting camera...</div>
+  <div id="link-overlay"><a id="link-anchor" href="#" target="_blank">🔗 Read more</a></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script type="module">
+    // ── Config ─────────────────────────────────────────
+    // Change this to your laptop's IP when testing on phone
+    const API_BASE = `https://${location.hostname}:8000`;
+
+    const canvas = document.getElementById('ar-canvas');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const linkOverlay = document.getElementById('link-overlay');
+    const linkAnchor = document.getElementById('link-anchor');
+
+    function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // ── Camera ─────────────────────────────────────────
+    const video = document.createElement('video');
+    video.autoplay = true; video.playsInline = true;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+      video.srcObject = stream;
+      await new Promise(r => video.onloadedmetadata = r);
+      video.play();
+      statusEl.textContent = 'Point camera at a QR card';
+    } catch(e) {
+      statusEl.textContent = 'Camera error: ' + e.message;
+    }
+
+    // ── State ───────────────────────────────────────────
+    const cardState   = {};   // id → { firstSeen, topic, emoji, color, answer, streaming }
+    const lastDetected = {};  // id → { stablePos, lastSeen }
+    const HOLDOFF_MS  = 2500;
+    const POS_SMOOTH  = 0.08;
+
+    // Track which card IDs have an active EventSource to prevent duplicates
+    const activeStreams = new Set();
+
+    // ── Fetch card metadata + start streaming answer ───
+    async function loadCard(id) {
+      if (cardState[id]) return;
+      if (activeStreams.has(id)) return;
+      activeStreams.add(id);
+      cardState[id] = { firstSeen: Date.now(), topic: '...', emoji: '🔍', color: '#4dc8ff', answer: '', streaming: true };
+
+      try {
+        // 1. Get card metadata
+        const meta = await fetch(`${API_BASE}/card/${id}`).then(r => r.json());
+        cardState[id].topic = meta.topic || `Card #${id}`;
+        cardState[id].emoji = meta.emoji || '❓';
+        cardState[id].color = meta.color || '#4dc8ff';
+        cardState[id].url   = meta.url || null;
+
+        // 2. Stream the answer via SSE
+        const es = new EventSource(`${API_BASE}/answer/${id}`);
+        es.onmessage = (e) => {
+          if (e.data === '[DONE]') {
+            if (cardState[id]) cardState[id].streaming = false;
+            activeStreams.delete(id);
+            es.close();
+            return;
+          }
+          if (cardState[id]) cardState[id].answer += e.data;
+        };
+        es.onerror = () => {
+          if (cardState[id]) cardState[id].streaming = false;
+          activeStreams.delete(id);
+          es.close();
+        };
+      } catch(e) {
+        if (cardState[id]) cardState[id].answer = 'Could not reach backend.';
+        if (cardState[id]) cardState[id].streaming = false;
+        activeStreams.delete(id);
+      }
+    }
+
+    // ── Drawing helpers ─────────────────────────────────
+    function roundRect(ctx, x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y);
+      ctx.quadraticCurveTo(x+w,y,x+w,y+r); ctx.lineTo(x+w,y+h-r);
+      ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h); ctx.lineTo(x+r,y+h);
+      ctx.quadraticCurveTo(x,y+h,x,y+h-r); ctx.lineTo(x,y+r);
+      ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+    }
+
+    function wrapText(ctx, text, cx, y, maxW, lh) {
+      const words = text.split(' ');
+      let line = '', lines = [];
+      for (const w of words) {
+        const t = line + (line ? ' ' : '') + w;
+        if (ctx.measureText(t).width > maxW && line) { lines.push(line); line = w; }
+        else line = t;
+      }
+      if (line) lines.push(line);
+      if (lines.length > 6) lines = lines.slice(0, 6);
+      const sy = y - ((lines.length - 1) * lh) / 2;
+      lines.forEach((l, i) => ctx.fillText(l, cx, sy + i * lh));
+    }
+
+    function wrapTextLeft(ctx, text, x, y, maxW, lh) {
+      ctx.textAlign = 'left';
+      const words = text.split(' ');
+      let line = '', lines = [];
+      for (const w of words) {
+        const t = line + (line ? ' ' : '') + w;
+        if (ctx.measureText(t).width > maxW && line) { lines.push(line); line = w; }
+        else line = t;
+      }
+      if (line) lines.push(line);
+      if (lines.length > 6) lines = lines.slice(0, 6);
+      lines.forEach((l, i) => ctx.fillText(l, x, y + i * lh));
+      ctx.textAlign = 'center';
+    }
+
+    function updateLinkOverlay(cardX, cardY, cardW, cardH, url) {
+      if (!url) { linkOverlay.style.display = 'none'; return; }
+      const linkY = cardY + cardH + 10;
+      const linkX = cardX + cardW / 2;
+      // Don't show if it would go off screen
+      if (linkY > window.innerHeight - 10) { linkOverlay.style.display = 'none'; return; }
+      linkOverlay.style.display = 'block';
+      linkOverlay.style.left = `${linkX}px`;
+      linkOverlay.style.top = `${linkY}px`;
+      linkOverlay.style.transform = 'translateX(-50%)';
+      linkAnchor.href = url;
+    }
+
+    function hideLinkOverlay() {
+      linkOverlay.style.display = 'none';
+    }
+
+    function measureLines(ctx, text, maxW) {
+      const words = text.split(' ');
+      let line = '', lines = [];
+      for (const w of words) {
+        const t = line + (line ? ' ' : '') + w;
+        if (ctx.measureText(t).width > maxW && line) { lines.push(line); line = w; }
+        else line = t;
+      }
+      if (line) lines.push(line);
+      return lines;
+    }
+
+    function drawCard(stablePos, state) {
+      const cw = canvas.width, ch = canvas.height;
+      const scaleX = cw / video.videoWidth;
+      const scaleY = ch / video.videoHeight;
+
+      const qrX = stablePos.x * scaleX;
+      const qrY = stablePos.y * scaleY;
+      const qrW = stablePos.w * scaleX;
+      const qrH = stablePos.h * scaleY;
+      const qrSize = Math.max(qrW, qrH);
+
+      const minCardW = cw * 0.55;
+      const cardW = Math.max(qrSize * 2.4, minCardW);
+      const fontSize = Math.max(11, cardW * 0.058);
+      const lh = fontSize * 1.5;
+      const headerH = Math.max(40, cardW * 0.22);
+      const padding = cardW * 0.06;
+      const textMaxW = cardW * 0.88;
+
+      // Measure how many lines the answer needs — cap to fit screen
+      ctx.font = `${fontSize}px -apple-system, sans-serif`;
+      const allLines = state.answer ? measureLines(ctx, state.answer, textMaxW) : [];
+      const maxCardH = ch * 0.75;
+      const maxTextH = maxCardH - headerH - padding * 3;
+      const maxLines = Math.floor(maxTextH / lh);
+      const lines = allLines.slice(0, maxLines);
+      const textBlockH = lines.length > 0 ? lines.length * lh : lh * 2;
+
+      // Card height fits the content, capped at 75% screen height
+      const cardH = Math.min(headerH + padding + textBlockH + padding * 2, maxCardH);
+
+      const cx = qrX + qrW / 2;
+      // Position card above the QR code, but clamp so it doesn't go off screen
+      let y = qrY - cardH - 8;
+      if (y < 8) y = 8;
+      const x = Math.min(Math.max(cx - cardW / 2, 8), cw - cardW - 8);
+
+      ctx.save();
+
+      // Shadow
+      ctx.shadowColor = 'rgba(0,0,0,0.55)';
+      ctx.shadowBlur = 24;
+
+      // Card body
+      ctx.globalAlpha = 0.93;
+      ctx.fillStyle = '#0d1117';
+      roundRect(ctx, x, y, cardW, cardH, 18);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Colored border
+      ctx.strokeStyle = state.color;
+      ctx.lineWidth = 3;
+      roundRect(ctx, x, y, cardW, cardH, 18);
+      ctx.stroke();
+
+      ctx.globalAlpha = 1;
+
+      // Header background
+      ctx.fillStyle = state.color + '22';
+      roundRect(ctx, x, y, cardW, headerH, 18);
+      ctx.fill();
+
+      // Emoji + topic
+      ctx.font = `${cardW * 0.1}px serif`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(state.emoji, x + cardW * 0.12, y + headerH * 0.7);
+
+      ctx.font = `bold ${Math.max(13, cardW * 0.07)}px -apple-system, sans-serif`;
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'left';
+      ctx.fillText(state.topic, x + cardW * 0.22, y + headerH * 0.68);
+
+      // Answer text
+      const textStartY = y + headerH + padding + fontSize;
+      ctx.font = `${fontSize}px -apple-system, sans-serif`;
+      ctx.fillStyle = state.streaming ? '#ccc' : '#fff';
+      ctx.textAlign = 'left';
+
+      if (state.answer) {
+        lines.forEach((l, i) => ctx.fillText(l, x + padding, textStartY + i * lh));
+      } else {
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.textAlign = 'center';
+        ctx.fillText('Loading...', cx, textStartY);
+      }
+
+      // Streaming indicator dots
+      if (state.streaming) {
+        const dotY = y + cardH - 14;
+        for (let i = 0; i < 3; i++) {
+          const alpha = 0.3 + 0.7 * Math.abs(Math.sin(Date.now() / 300 + i));
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = state.color;
+          ctx.beginPath();
+          ctx.arc(cx + (i - 1) * 14, dotY, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      ctx.restore();
+
+      // Position the DOM link overlay at the bottom of the card
+      updateLinkOverlay(x, y, cardW, cardH, state.url);
+    }
+
+    // ── QR Scanning ─────────────────────────────────────
+    const scanCanvas = document.createElement('canvas');
+    const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
+    let frameCount = 0;
+
+    function tick() {
+      if (video.readyState < 2) { requestAnimationFrame(tick); return; }
+
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      frameCount++;
+      if (frameCount % 6 === 0) {
+        scanCanvas.width = video.videoWidth;
+        scanCanvas.height = video.videoHeight;
+        scanCtx.drawImage(video, 0, 0);
+        const imageData = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+        const qr = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+
+        if (qr && qr.data.startsWith('flashcard:')) {
+          const id = qr.data.split(':')[1];
+          const tl = qr.location.topLeftCorner;
+          const br = qr.location.bottomRightCorner;
+          const newPos = { x: tl.x, y: tl.y, w: br.x - tl.x, h: br.y - tl.y };
+
+          // Clear any other cards — only show the active one
+          for (const otherId of Object.keys(lastDetected)) {
+            if (otherId !== id) { delete lastDetected[otherId]; delete cardState[otherId]; }
+          }
+
+          if (!lastDetected[id]) {
+            lastDetected[id] = { stablePos: newPos, lastSeen: Date.now() };
+            loadCard(id);
+          } else {
+            const s = lastDetected[id].stablePos;
+            s.x += (newPos.x - s.x) * POS_SMOOTH;
+            s.y += (newPos.y - s.y) * POS_SMOOTH;
+            s.w += (newPos.w - s.w) * POS_SMOOTH;
+            s.h += (newPos.h - s.h) * POS_SMOOTH;
+            lastDetected[id].lastSeen = Date.now();
+          }
+        }
+
+        // Expire stale detections
+        for (const id of Object.keys(lastDetected)) {
+          if (Date.now() - lastDetected[id].lastSeen > HOLDOFF_MS) {
+            delete lastDetected[id];
+            delete cardState[id];
+          }
+        }
+      }
+
+      // Draw cards every frame
+      let anyVisible = false;
+      for (const [id, detected] of Object.entries(lastDetected)) {
+        const state = cardState[id];
+        if (!state) continue;
+        drawCard(detected.stablePos, state);
+        statusEl.textContent = state.streaming ? `Loading: ${state.topic}` : state.topic;
+        anyVisible = true;
+      }
+      if (!anyVisible) { statusEl.textContent = 'Point camera at a QR card'; hideLinkOverlay(); }
+
+      requestAnimationFrame(tick);
+    }
+
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>

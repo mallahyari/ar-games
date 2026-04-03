@@ -1,0 +1,37 @@
+{
+  "0": {
+    "topic": "Photosynthesis",
+    "query": "Explain photosynthesis in simple terms",
+    "emoji": "🌱",
+    "color": "#4dffb4",
+    "url": "https://en.wikipedia.org/wiki/Photosynthesis"
+  },
+  "1": {
+    "topic": "Black Holes",
+    "query": "What is a black hole and how does it form?",
+    "emoji": "🌑",
+    "color": "#c44dff",
+    "url": "https://en.wikipedia.org/wiki/Black_hole"
+  },
+  "2": {
+    "topic": "The Internet",
+    "query": "How does the internet actually work?",
+    "emoji": "🌐",
+    "color": "#4dc8ff",
+    "url": "https://en.wikipedia.org/wiki/Internet"
+  },
+  "3": {
+    "topic": "DNA",
+    "query": "What is DNA and why is it important?",
+    "emoji": "🧬",
+    "color": "#ff6b9d",
+    "url": "https://en.wikipedia.org/wiki/DNA"
+  },
+  "4": {
+    "topic": "Gravity",
+    "query": "What is gravity and why do things fall?",
+    "emoji": "🍎",
+    "color": "#ffdd4d",
+    "url": "https://en.wikipedia.org/wiki/Gravity"
+  }
+}

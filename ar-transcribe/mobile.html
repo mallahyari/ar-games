@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>AR Transcribe</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; font-family: -apple-system, sans-serif; }
+
+    #ar-canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+
+    #status {
+      position: fixed; top: 16px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.65);
+      color: #fff; padding: 8px 18px;
+      border-radius: 20px; font-size: 15px;
+      z-index: 10; white-space: nowrap;
+    }
+
+    #indicator {
+      position: fixed; top: 20px; right: 20px;
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #f44;
+      z-index: 10;
+      transition: background 0.3s;
+    }
+    #indicator.connected { background: #4f4; }
+
+    /* Transcript panel */
+    #transcript-panel {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      padding: 60px 28px 52px;
+      background: linear-gradient(transparent, rgba(0,0,0,0.85) 45%);
+      z-index: 10;
+      min-height: 220px;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      gap: 12px;
+      pointer-events: none;
+    }
+
+    .segment {
+      font-size: 18px;
+      line-height: 1.55;
+      color: rgba(255,255,255,0.3);
+      transition: opacity 0.5s;
+    }
+    .segment.old1 { color: rgba(255,255,255,0.45); font-size: 16px; }
+    .segment.old2 { color: rgba(255,255,255,0.2);  font-size: 15px; }
+
+    /* Current segment — words animate in */
+    .segment.current {
+      font-size: 21px;
+      font-weight: 600;
+      color: #fff;
+    }
+
+    /* Individual word spans inside current segment */
+    .word {
+      display: inline;
+      opacity: 0;
+      transform: translateY(6px);
+      animation: wordIn 0.18s ease forwards;
+    }
+    @keyframes wordIn {
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Glow effect on current segment */
+    .segment.current {
+      text-shadow:
+        0 0 12px rgba(100, 200, 255, 0.9),
+        0 0 28px rgba(100, 200, 255, 0.5),
+        0 1px 4px rgba(0,0,0,0.9);
+      animation: glowPulse 2s ease-in-out infinite;
+    }
+    @keyframes glowPulse {
+      0%, 100% { text-shadow: 0 0 12px rgba(100,200,255,0.9), 0 0 28px rgba(100,200,255,0.5), 0 1px 4px rgba(0,0,0,0.9); }
+      50%       { text-shadow: 0 0 20px rgba(100,200,255,1.0), 0 0 48px rgba(100,200,255,0.7), 0 1px 4px rgba(0,0,0,0.9); }
+    }
+
+    /* Mic icon */
+    #mic {
+      position: fixed; bottom: 12px; right: 20px;
+      font-size: 22px; z-index: 10;
+      opacity: 0; transition: opacity 0.3s;
+    }
+    #mic.active { opacity: 1; animation: micPulse 1.5s infinite; }
+    @keyframes micPulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="ar-canvas"></canvas>
+  <div id="status">Connecting...</div>
+  <div id="indicator"></div>
+  <div id="transcript-panel"></div>
+  <div id="mic">🎙</div>
+
+  <script type="module">
+    const WS_URL    = `wss://${location.hostname}:${location.port}/ws`;
+    const MAX_SEGS  = 3;
+    const WORD_DELAY = 70; // ms between each word popping in
+
+    const canvas    = document.getElementById('ar-canvas');
+    const ctx       = canvas.getContext('2d');
+    const statusEl  = document.getElementById('status');
+    const indicator = document.getElementById('indicator');
+    const panel     = document.getElementById('transcript-panel');
+    const micEl     = document.getElementById('mic');
+
+    // ── Resize ───────────────────────────────────────────
+    function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // ── Camera ───────────────────────────────────────────
+    const video = document.createElement('video');
+    video.autoplay = true; video.playsInline = true;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false,
+      });
+      video.srcObject = stream;
+      await new Promise(r => video.onloadedmetadata = r);
+      video.play();
+    } catch(e) {
+      statusEl.textContent = 'Camera error: ' + e.message;
+    }
+
+    // ── Render loop ──────────────────────────────────────
+    function tick() {
+      if (video.readyState >= 2) ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+
+    // ── Segments store ───────────────────────────────────
+    // Each entry: { text: string, el: div }
+    let segments = [];
+
+    function addSegment(text) {
+      // Decide: new segment or append to last
+      let isNew = true;
+      if (segments.length > 0) {
+        const last = segments[segments.length - 1].text.trim();
+        if (!/[.!?]$/.test(last)) isNew = false;
+      }
+
+      if (isNew) {
+        if (segments.length >= MAX_SEGS) {
+          const oldest = segments.shift();
+          oldest.el.remove();
+        }
+        const div = document.createElement('div');
+        div.className = 'segment current';
+        panel.appendChild(div);
+        segments.push({ text, el: div });
+      } else {
+        const last = segments[segments.length - 1];
+        last.text += ' ' + text;
+      }
+
+      // Re-apply age classes to older segments
+      segments.forEach((s, i) => {
+        const age = segments.length - 1 - i;
+        if (age === 0) s.el.className = 'segment current';
+        else if (age === 1) s.el.className = 'segment old1';
+        else s.el.className = 'segment old2';
+      });
+
+      // Animate words into the current (newest) segment
+      animateWords(segments[segments.length - 1]);
+    }
+
+    function animateWords(seg) {
+      const div = seg.el;
+      const words = seg.text.split(' ');
+      div.innerHTML = '';
+      words.forEach((word, i) => {
+        const span = document.createElement('span');
+        span.className = 'word';
+        span.textContent = (i > 0 ? ' ' : '') + word;
+        span.style.animationDelay = `${i * WORD_DELAY}ms`;
+        div.appendChild(span);
+      });
+    }
+
+    // ── WebSocket ────────────────────────────────────────
+    function connect() {
+      const ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        statusEl.textContent = 'Live';
+        indicator.className = 'connected';
+        micEl.className = 'active';
+      };
+
+      ws.onmessage = (e) => {
+        if (e.data && e.data.trim()) addSegment(e.data.trim());
+      };
+
+      ws.onclose = () => {
+        statusEl.textContent = 'Reconnecting...';
+        indicator.className = '';
+        micEl.className = '';
+        setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => ws.close();
+    }
+
+    connect();
+  </script>
+</body>
+</html>
