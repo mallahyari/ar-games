@@ -8,7 +8,7 @@ All projects share a single Python virtual environment managed by [uv](https://g
 
 ## Projects
 
-### 🫧 Bubble Pop
+### 🫧 [Bubble Pop](bubble-pop/)
 Digital bubbles float up a projected wall. Reach out and pop them by moving your hand near them. The camera detects your palm position in real time using MediaPipe Hands.
 
 **Tech:** Python + MediaPipe Hands → WebSocket → Browser Canvas
@@ -21,7 +21,7 @@ open bubble-pop/index.html
 
 ---
 
-### 📄 Gesture PDF Viewer
+### 📄 [Gesture PDF Viewer](gesture-pdf/)
 A hands-free PDF viewer controlled by gestures. Swipe left/right to turn pages. Bring both index fingers together or apart to zoom in and out. Includes an AR mode where the PDF floats in front of your live camera feed.
 
 **Tech:** Python + MediaPipe Hands → WebSocket → Browser (PDF.js + Canvas)
@@ -40,7 +40,36 @@ uv run python -m http.server 8080
 
 ---
 
-### 🃏 AR Flashcards
+### 🎙 [AR Transcribe](ar-transcribe/)
+Real-time speech-to-text as an AR overlay on your phone camera feed. Words animate in one by one with a glowing effect as you speak. Captures audio from your laptop mic or system audio (YouTube, video calls, podcasts) via BlackHole.
+
+**Tech:** Python + Deepgram Nova-3 → WebSocket → Browser Canvas
+
+**Run:**
+```bash
+DEEPGRAM_API_KEY=your_key uv run python ar-transcribe/server.py
+# Choose audio input device, then on your phone open:
+# https://YOUR_LAPTOP_IP:8443/ar-transcribe/mobile.html
+```
+
+---
+
+### 🤖 [AR RAG](ar-rag/)
+Point your phone at a QR card and a floating AI-powered information panel appears above it. The answer streams word by word from a FastAPI backend with a tappable link for more details.
+
+**Tech:** QR detection (jsQR) + FastAPI SSE streaming → Canvas AR overlay + DOM link overlay
+
+**Run:**
+```bash
+uv run python ar-rag/backend.py
+uv run python https_server.py
+# On your phone open:
+# https://YOUR_LAPTOP_IP:8443/ar-rag/mobile.html
+```
+
+---
+
+### 🃏 [AR Flashcards](ar-flashcards/)
 Point your phone camera at a QR code card and a flashcard appears floating above it in AR. Hold it steady for 2 seconds and the answer reveals with an animation. Works entirely in the phone browser — no special hardware needed.
 
 **Tech:** QR detection (jsQR) in browser + Canvas AR overlay. Python generates QR marker images.
