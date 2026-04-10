@@ -84,6 +84,23 @@
       50%       { text-shadow: 0 0 20px rgba(100,200,255,1.0), 0 0 48px rgba(100,200,255,0.7), 0 1px 4px rgba(0,0,0,0.9); }
     }
 
+    /* Mode toggle */
+    #mode-toggle {
+      position: fixed; top: 16px; left: 20px;
+      display: flex; gap: 6px; z-index: 10;
+    }
+    #mode-toggle button {
+      background: rgba(0,0,0,0.6);
+      color: #888; border: 1px solid #444;
+      border-radius: 16px; padding: 6px 14px;
+      font-size: 13px; font-weight: 600;
+      cursor: pointer;
+    }
+    #mode-toggle button.active {
+      background: rgba(59,130,246,0.3);
+      color: #fff; border-color: #3b82f6;
+    }
+
     /* Mic icon */
     #mic {
       position: fixed; bottom: 12px; right: 20px;
@@ -101,13 +118,18 @@
   <canvas id="ar-canvas"></canvas>
   <div id="status">Connecting...</div>
   <div id="indicator"></div>
+  <!-- Mode toggle -->
+  <div id="mode-toggle">
+    <button id="btn-transcript" class="active">EN</button>
+    <button id="btn-translation">FA</button>
+  </div>
   <div id="transcript-panel"></div>
   <div id="mic">🎙</div>
 
   <script type="module">
-    const WS_URL    = `wss://${location.hostname}:${location.port}/ws`;
+    const WS_URL    = `wss://${location.hostname}:${location.port}/ws/display`;
     const MAX_SEGS  = 3;
-    const WORD_DELAY = 70; // ms between each word popping in
+    const WORD_DELAY = 70;
 
     const canvas    = document.getElementById('ar-canvas');
     const ctx       = canvas.getContext('2d');
@@ -115,6 +137,29 @@
     const indicator = document.getElementById('indicator');
     const panel     = document.getElementById('transcript-panel');
     const micEl     = document.getElementById('mic');
+    const btnTranscript  = document.getElementById('btn-transcript');
+    const btnTranslation = document.getElementById('btn-translation');
+
+    // Mode: 'transcript' or 'translation'
+    let mode = 'transcript';
+
+    btnTranscript.addEventListener('click', () => {
+      mode = 'transcript';
+      btnTranscript.className = 'active';
+      btnTranslation.className = '';
+      clearSegments();
+    });
+    btnTranslation.addEventListener('click', () => {
+      mode = 'translation';
+      btnTranslation.className = 'active';
+      btnTranscript.className = '';
+      clearSegments();
+    });
+
+    function clearSegments() {
+      segments = [];
+      panel.innerHTML = '';
+    }
 
     // ── Resize ───────────────────────────────────────────
     function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
@@ -206,7 +251,10 @@
       };
 
       ws.onmessage = (e) => {
-        if (e.data && e.data.trim()) addSegment(e.data.trim());
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === mode && msg.text) addSegment(msg.text);
+        } catch {}
       };
 
       ws.onclose = () => {

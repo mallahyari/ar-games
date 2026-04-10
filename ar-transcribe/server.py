@@ -1,10 +1,13 @@
 """
 AR Transcribe — FastAPI server.
-Captures laptop mic audio, streams to Deepgram for real-time transcription,
-and forwards transcript words to connected phone browsers via WebSocket.
+
+New architecture:
+- laptop.html  captures tab audio via getDisplayMedia() and streams PCM to /ws/audio
+- server.py    forwards audio to Deepgram, translates with Gemini, broadcasts to /ws/display
+- mobile.html  connects to /ws/display and shows live transcript/translation as AR overlay
 
 Run:
-    DEEPGRAM_API_KEY=your_key uv run python ar-transcribe/server.py
+    DEEPGRAM_API_KEY=your_key GEMINI_API_KEY=your_key uv run python ar-transcribe/server.py
 """
 import asyncio
 import json
@@ -14,8 +17,6 @@ import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import numpy as np
-import sounddevice as sd
 import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,10 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from google import genai
 import uvicorn
 
-SAMPLE_RATE = 16000
-CHANNELS = 1
-CHUNK_SIZE = 1600   # 100 ms at 16 kHz
-
+SAMPLE_RATE = 16000   # browser resamples to this before sending
 DEEPGRAM_URL = (
     "wss://api.deepgram.com/v1/listen"
     "?model=nova-3"
@@ -42,131 +40,42 @@ DEEPGRAM_URL = (
 GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 TARGET_LANG = "Persian (Farsi)"
 
-clients: set[WebSocket] = set()
-selected_device: int | None = None  # set at startup
+# Phones waiting for transcript/translation
+display_clients: set[WebSocket] = set()
 gemini_client: genai.Client | None = None
 
 
 async def translate(text: str) -> str:
-    """Translate text to Persian using Gemini Flash."""
     try:
         response = await asyncio.to_thread(
             gemini_client.models.generate_content,
             model=GEMINI_MODEL,
-            contents=f"Translate the following to {TARGET_LANG}. Return only the translation, no explanation:\n\n{text}",
+            contents=(
+                f"Translate the following to {TARGET_LANG}. "
+                f"Return only the translation, no explanation:\n\n{text}"
+            ),
         )
         return response.text.strip()
     except Exception as e:
         print(f"[translate error] {e}", flush=True)
-        return text  # fall back to original if translation fails
+        return text
 
 
-def pick_device() -> int | None:
-    """Print available input devices and let user choose one."""
-    devices = sd.query_devices()
-    inputs = [(i, d) for i, d in enumerate(devices) if d["max_input_channels"] > 0]
-
-    print("\nAvailable audio input devices:")
-    for i, (idx, d) in enumerate(inputs):
-        print(f"  {i}) [{idx}] {d['name']}")
-
-    print(f"\nPress Enter to use default, or enter a number (0-{len(inputs)-1}): ", end="", flush=True)
-    choice = input().strip()
-    if not choice:
-        print("Using default input device.", flush=True)
-        return None
-    try:
-        chosen = inputs[int(choice)]
-        print(f"Using: {chosen[1]['name']}", flush=True)
-        return chosen[0]
-    except (ValueError, IndexError):
-        print("Invalid choice, using default.", flush=True)
-        return None
-
-
-async def broadcast(text: str) -> None:
-    global clients
+async def broadcast(payload: dict) -> None:
+    """Send JSON payload to all display clients (phones)."""
+    global display_clients
+    message = json.dumps(payload)
     dead: set[WebSocket] = set()
-    for ws in list(clients):
+    for ws in list(display_clients):
         try:
-            await ws.send_text(text)
+            await ws.send_text(message)
         except Exception:
             dead.add(ws)
-    clients -= dead
-
-
-async def run_transcription() -> None:
-    """Capture mic audio and stream to Deepgram via raw WebSocket."""
-    loop = asyncio.get_event_loop()
-    api_key = os.environ["DEEPGRAM_API_KEY"]
-    headers = {"Authorization": f"Token {api_key}"}
-
-    # Use device's native sample rate to avoid resampling issues
-    dev_info = sd.query_devices(selected_device, "input")
-    actual_rate = int(dev_info["default_samplerate"])
-    print(f"Device: {dev_info['name']} @ {actual_rate} Hz", flush=True)
-
-    dg_url = (
-        "wss://api.deepgram.com/v1/listen"
-        "?model=nova-3"
-        "&language=en-US"
-        "&encoding=linear16"
-        f"&sample_rate={actual_rate}"
-        "&channels=1"
-        "&smart_format=true"
-        "&interim_results=false"
-        "&endpointing=300"
-    )
-    chunk_size = actual_rate // 10  # 100 ms
-
-    while True:
-        try:
-            print("Connecting to Deepgram...", flush=True)
-            async with websockets.connect(dg_url, additional_headers=headers) as ws:
-                print("Connected. Listening to microphone...", flush=True)
-
-                audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
-
-                def audio_callback(indata, frames, time_info, status):
-                    pcm = (indata[:, 0] * 32767).astype(np.int16)
-                    loop.call_soon_threadsafe(audio_queue.put_nowait, pcm.tobytes())
-
-                async def send_audio():
-                    while True:
-                        chunk = await audio_queue.get()
-                        await ws.send(chunk)
-
-                async def receive():
-                    async for msg in ws:
-                        data = json.loads(msg)
-                        if data.get("type") == "Results":
-                            alts = data.get("channel", {}).get("alternatives", [])
-                            if alts and data.get("is_final"):
-                                text = alts[0].get("transcript", "").strip()
-                                if text:
-                                    print(f"[transcript] {text}", flush=True)
-                                    translated = await translate(text)
-                                    print(f"[translated] {translated}", flush=True)
-                                    await broadcast(translated)
-
-                with sd.InputStream(
-                    device=selected_device,
-                    samplerate=actual_rate,
-                    channels=1,
-                    dtype="float32",
-                    blocksize=chunk_size,
-                    callback=audio_callback,
-                ):
-                    await asyncio.gather(send_audio(), receive())
-
-        except Exception as e:
-            print(f"Deepgram error: {e}. Reconnecting in 3s...", flush=True)
-            await asyncio.sleep(3)
+    display_clients -= dead
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    asyncio.create_task(run_transcription())
+async def lifespan(_app: FastAPI):
     yield
 
 
@@ -179,25 +88,76 @@ app.add_middleware(
 )
 
 
-@app.websocket("/ws")
-async def ws_endpoint(websocket: WebSocket):
+@app.websocket("/ws/audio")
+async def audio_endpoint(websocket: WebSocket):
+    """
+    Receives raw PCM audio chunks from laptop.html,
+    streams them to Deepgram, translates results, broadcasts to phones.
+    """
     await websocket.accept()
-    clients.add(websocket)
+    api_key = os.environ["DEEPGRAM_API_KEY"]
+    headers = {"Authorization": f"Token {api_key}"}
+
+    print("[audio] Laptop connected, opening Deepgram stream...", flush=True)
+
+    try:
+        async with websockets.connect(DEEPGRAM_URL, additional_headers=headers) as dg_ws:
+            print("[audio] Deepgram connected.", flush=True)
+
+            async def receive_from_laptop():
+                """Forward audio chunks from browser to Deepgram."""
+                try:
+                    while True:
+                        data = await websocket.receive_bytes()
+                        await dg_ws.send(data)
+                except WebSocketDisconnect:
+                    print("[audio] Laptop disconnected.", flush=True)
+                    await dg_ws.close()
+
+            async def receive_from_deepgram():
+                """Receive transcripts from Deepgram, translate, broadcast."""
+                async for msg in dg_ws:
+                    data = json.loads(msg)
+                    if data.get("type") == "Results":
+                        alts = data.get("channel", {}).get("alternatives", [])
+                        if alts and data.get("is_final"):
+                            transcript = alts[0].get("transcript", "").strip()
+                            if transcript:
+                                print(f"[transcript] {transcript}", flush=True)
+                                # Broadcast transcript immediately
+                                await broadcast({"type": "transcript", "text": transcript})
+                                # Translate and broadcast
+                                translated = await translate(transcript)
+                                print(f"[translated] {translated}", flush=True)
+                                await broadcast({"type": "translation", "text": translated})
+
+            await asyncio.gather(receive_from_laptop(), receive_from_deepgram())
+
+    except Exception as e:
+        print(f"[audio] Error: {e}", flush=True)
+
+
+@app.websocket("/ws/display")
+async def display_endpoint(websocket: WebSocket):
+    """Phone connects here to receive transcript/translation."""
+    await websocket.accept()
+    display_clients.add(websocket)
+    print(f"[display] Phone connected. Total: {len(display_clients)}", flush=True)
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass
     finally:
-        clients.discard(websocket)
+        display_clients.discard(websocket)
+        print(f"[display] Phone disconnected. Total: {len(display_clients)}", flush=True)
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "display_clients": len(display_clients)}
 
 
-# Serve ar-transcribe static files at /ar-transcribe/
 app.mount(
     "/ar-transcribe",
     StaticFiles(directory=str(Path(__file__).parent), html=True),
@@ -220,25 +180,21 @@ if __name__ == "__main__":
             check=True,
         )
 
+    for key in ("DEEPGRAM_API_KEY", "GEMINI_API_KEY"):
+        if key not in os.environ:
+            print(f"ERROR: {key} environment variable not set.")
+            raise SystemExit(1)
+
+    gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
     try:
         local_ip = socket.gethostbyname(socket.gethostname())
     except Exception:
         local_ip = "127.0.0.1"
 
-    print(f"\nAR Transcribe — single server on port 8443:")
-    print(f"  https://{local_ip}:8443/ar-transcribe/mobile.html\n")
-
-    if "DEEPGRAM_API_KEY" not in os.environ:
-        print("ERROR: DEEPGRAM_API_KEY environment variable not set.")
-        raise SystemExit(1)
-    if "GEMINI_API_KEY" not in os.environ:
-        print("ERROR: GEMINI_API_KEY environment variable not set.")
-        raise SystemExit(1)
-
-    gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    print(f"Translation: English → {TARGET_LANG} via Gemini Flash", flush=True)
-
-    selected_device = pick_device()
+    print(f"\nAR Transcribe:")
+    print(f"  Laptop page : https://{local_ip}:8443/ar-transcribe/laptop.html")
+    print(f"  Phone page  : https://{local_ip}:8443/ar-transcribe/mobile.html\n")
 
     uvicorn.run(
         app,
