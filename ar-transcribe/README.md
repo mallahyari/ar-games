@@ -1,46 +1,51 @@
 # AR Transcribe
 
-Real-time speech-to-text as an augmented reality overlay on your phone. Point your phone camera at anything — a speaker, a screen, a room — and see live transcription floating over the camera feed with animated word-by-word reveal and a blue glow effect.
+Real-time speech transcription and translation as an augmented reality overlay on your phone. Share any browser tab (YouTube, news, podcasts) from your laptop and see live English transcription or Persian translation floating over your phone camera feed — word by word, with a glowing blue effect.
 
-Audio is captured on the laptop, transcribed by Deepgram Nova-3, and streamed to the phone over WebSocket.
+No BlackHole. No mic setup. Just share a tab and open a URL on your phone.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     subgraph Laptop
-        A[Audio Input\nMic / BlackHole] -->|PCM 16-bit| B[sounddevice]
-        B -->|audio chunks| C[FastAPI Server\nport 8443]
-        C <-->|WebSocket streaming| D[Deepgram Nova-3\napi.deepgram.com]
-        D -->|final transcript| C
+        A[Browser Tab\nYouTube / News] -->|getDisplayMedia| B[laptop.html]
+        B -->|PCM audio chunks\nWebSocket /ws/audio| C[FastAPI Server\nport 8443]
+        C <-->|WebSocket| D[Deepgram Nova-3]
+        D -->|transcript| C
+        C -->|translate| E[Gemini Flash]
+        E -->|Persian text| C
     end
 
-    subgraph Phone Browser
-        E[Camera Feed\ncanvas]
-        F[WebSocket Client\nwss://laptop:8443/ws]
-        G[AR Overlay\nword reveal + glow]
-        F -->|transcript text| G
-        E --- G
+    subgraph Phone
+        F[WebSocket Client\n/ws/display]
+        G[AR Overlay\nEN / FA toggle]
+        H[Camera Feed]
+        F -->|transcript or translation| G
+        H --- G
     end
 
-    C -->|transcript text| F
-    C -->|serves mobile.html| F
+    C -->|JSON broadcast| F
+    C -->|serves pages| F
 ```
 
 ## How It Works
 
-1. `server.py` opens a selected audio input device via `sounddevice`
-2. 100ms PCM chunks are streamed to Deepgram's live WebSocket API
-3. Deepgram returns final transcripts (Nova-3 model, ~300ms latency)
-4. The server forwards each sentence to all connected phone browsers via WebSocket
-5. `mobile.html` renders the camera feed on a canvas and animates each word into view with a glowing effect
+1. Open `laptop.html` in your laptop browser
+2. Click **Start Capturing** → pick the tab playing audio → check **Share tab audio**
+3. Browser captures tab audio via `getDisplayMedia()` and streams PCM to the server
+4. Server forwards audio to Deepgram → gets transcript (~300ms)
+5. Transcript is sent to Gemini Flash for Persian translation (~500ms)
+6. Both transcript and translation are broadcast as JSON to all connected phones
+7. Phone shows either English transcript or Persian translation — toggle with EN / FA button
 
 ## Project Structure
 
 ```
 ar-transcribe/
-├── server.py       # FastAPI server — audio capture, Deepgram, WebSocket broadcast
-└── mobile.html     # Phone AR viewer — camera feed + transcript overlay
+├── server.py       # FastAPI — /ws/audio (laptop), /ws/display (phone), Deepgram, Gemini
+├── laptop.html     # Laptop page — tab audio capture via getDisplayMedia()
+└── mobile.html     # Phone AR viewer — camera feed + animated text overlay + EN/FA toggle
 ```
 
 ## Setup
@@ -48,58 +53,48 @@ ar-transcribe/
 ### Requirements
 
 ```bash
-uv add fastapi uvicorn websockets sounddevice numpy
+uv add fastapi uvicorn websockets numpy google-genai
 ```
 
-You need a [Deepgram](https://deepgram.com) API key. The free tier includes 200 hours/month.
+You need:
+- [Deepgram](https://deepgram.com) API key — free tier: 200 hours/month
+- [Gemini](https://ai.google.dev) API key — for translation
 
 ### Run
 
 ```bash
-DEEPGRAM_API_KEY=your_key uv run python ar-transcribe/server.py
+DEEPGRAM_API_KEY=your_deepgram_key GEMINI_API_KEY=your_gemini_key uv run python ar-transcribe/server.py
 ```
 
-On startup it lists all available audio input devices and lets you pick one:
-
+Then open on your **laptop**:
 ```
-Available audio input devices:
-  0) [0] MacBook Pro Microphone
-  1) [2] BlackHole 2ch
-  2) [3] MirrorMeister Audio
-
-Press Enter to use default, or enter a number:
+https://<your-laptop-ip>:8443/ar-transcribe/laptop.html
 ```
 
-Then on your phone open:
-
+And on your **phone**:
 ```
 https://<your-laptop-ip>:8443/ar-transcribe/mobile.html
 ```
 
-> The server also serves the static file — no separate static server needed.
+> Accept the self-signed certificate warning once on both devices.
 
-## Audio Input Options
+## Usage
 
-| Source | How |
-|--------|-----|
-| **Laptop mic** | Default — pick `MacBook Pro Microphone` |
-| **Room / speaker nearby** | Same — point laptop toward the sound |
-| **System audio (YouTube, video calls)** | Install BlackHole (see below), pick `BlackHole 2ch` |
-| **iPhone mic** | Shows as `Mehdi's iPhone Microphone` via Continuity Camera — requires iPhone to be active as webcam |
+1. On laptop: click **▶ Start Capturing**, pick the YouTube/news tab, check **Share tab audio**
+2. On phone: open the mobile URL, tap **EN** for English transcript or **FA** for Persian translation
+3. Speak or play any video — text appears on your phone in real time
 
-### Capturing System Audio with BlackHole
+## Changing the Target Language
 
-To transcribe audio playing on the laptop screen (YouTube, podcasts, video calls):
+Edit `TARGET_LANG` in `server.py`:
 
-1. Install BlackHole: `brew install blackhole-2ch`
-2. Open **Audio MIDI Setup** → `+` → **Create Multi-Output Device**
-3. Check **BlackHole 2ch** + **MacBook Pro Speakers** (so you still hear audio)
-4. **System Settings → Sound → Output** → select **Multi-Output Device**
-5. **System Settings → Sound → Input** → select **BlackHole 2ch**
-6. Restart the server and pick **BlackHole 2ch**
+```python
+TARGET_LANG = "Persian (Farsi)"  # change to any language
+```
 
 ## Phone UI
 
+- **EN / FA toggle** — switch between English transcript and Persian translation
 - **Green dot** — connected to server
 - **🎙 icon** — pulsing when live
 - Words animate in one by one (70ms apart) with a slide-up effect
@@ -108,12 +103,11 @@ To transcribe audio playing on the laptop screen (YouTube, podcasts, video calls
 
 ## Certificate
 
-The server auto-generates a self-signed TLS certificate (`_dev_cert.pem`) on first run, required for `getUserMedia` (camera access) over HTTPS. Accept the browser warning once on both laptop and phone.
+The server auto-generates a self-signed TLS certificate on first run, required for `getDisplayMedia()` and phone camera access over HTTPS.
 
 ## Use Cases
 
-- **Accessibility** — live captions for deaf/hard-of-hearing in real conversations
-- **Lectures / talks** — AR captions floating over the speaker
-- **Video transcription** — transcribe YouTube, Netflix, video calls in real time
-- **Language learning** — see words as they're spoken
-- **Add translation** — pipe transcripts through an LLM to show translated text instead
+- **Real-time translation** — watch a video in English, read it in Persian on your phone
+- **Live news** — follow foreign language broadcasts with live captions
+- **Language learning** — toggle between original and translation while watching content
+- **Meetings** — share the meeting tab, get live translation for non-native speakers
